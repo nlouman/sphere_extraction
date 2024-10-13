@@ -5,6 +5,7 @@ import torch
 from typing import Tuple
 import os
 import math
+from scipy.optimize import minimize
 
 class Helper:
     def create_folder_structure(output_folder, mask_output_folder, bbox_output_folder):
@@ -162,6 +163,55 @@ class MaskHelper:
 
         return loss
     
+        
+    def fit_ellipse_with_restarts(filtered_mask, x0, bounds, num_restarts=5, seed=42, normalization_param=1):
+        """
+        Fit an ellipse using optimization, with multiple restarts by perturbing initial guesses.
+        
+        Parameters:
+        filtered_mask (np.ndarray): The binary mask to fit the ellipse to.
+        x0 (list): The initial guess for ellipse parameters [x_c, y_c, a, b, theta].
+        bounds (list of tuples): The bounds for [x_c, y_c, a, b, theta].
+        num_restarts (int): Number of times to restart the optimization with randomized starting parameters.
+        seed (int): Seed for the random number generator to ensure reproducibility.
+        
+        Returns:
+        tuple: Best ellipse parameters (x_c_opt, y_c_opt, a_opt, b_opt, theta_opt) and final loss.
+        """
+        rng = np.random.default_rng(seed)  # Pseudo-random generator for reproducibility
+        best_result = None
+        best_loss = float('inf')
+
+        # Function to randomly perturb initial guess within bounds
+        def randomize_initial_guess(x0, bounds, rng):
+            perturbed_x0 = []
+            for param, (low, high) in zip(x0, bounds):
+                std_dev = (high - low) / 10  # Standard deviation for noise is 10% of the range
+                perturbed_value = rng.normal(loc=param, scale=std_dev)  # Generate normal noise
+                perturbed_value = np.clip(perturbed_value, low, high)  # Ensure within bounds
+                perturbed_x0.append(perturbed_value)
+            return perturbed_x0
+
+        # Run multiple optimization attempts with randomized initial guesses
+        for restart in range(num_restarts):
+            # Randomize the initial guess
+            randomized_x0 = randomize_initial_guess(x0, bounds, rng)
+
+            # Minimize the loss function using the Powell method
+            result = minimize(MaskHelper.loss_function, randomized_x0, args=(filtered_mask, 1, 1), bounds=bounds, method='Powell')
+
+            # Calculate the final loss for the current optimization
+            final_loss = MaskHelper.loss_function(result.x, filtered_mask) / normalization_param
+
+            # Track the best result based on the loss
+            if final_loss < best_loss:
+                best_loss = final_loss
+                best_result = result.x
+
+            print(f"Restart {restart + 1}/{num_restarts}: Initial guess = {randomized_x0}, Optimized parameters = {result.x}, Loss = {final_loss}")
+
+        return best_result, best_loss
+    
     ############################################################################################################
     # Functions for ordering spheres
     ############################################################################################################
@@ -171,7 +221,7 @@ class MaskHelper:
         Compute the global center (average) of all sphere coordinates.
         
         Parameters:
-        spheres (list of tuples): A list of tuples where each tuple contains (x_center, y_center, radius)
+        spheres (list of tuples): A list of tuples where each tuple contains (x_center, y_center, a, b, theta).
 
         Returns:
         tuple: (x_avg, y_avg) the global center
@@ -220,24 +270,24 @@ class MaskHelper:
         Find the isolated sphere, i.e., the sphere with the greatest distance to its nearest neighbor.
 
         Parameters:
-        spheres (list of tuples): A list of tuples where each tuple contains (x_center, y_center, radius)
+        spheres (list of tuples): A list of tuples where each tuple contains (x_center, y_center, a, b, theta)
 
         Returns:
-        tuple: The isolated sphere (x_center, y_center, radius)
+        tuple: The isolated sphere (x_center, y_center, a, b, theta)
         """
         max_min_distance = -1
         isolated_sphere = None
 
         # Calculate the pairwise distances between all spheres
         for i, sphere_i in enumerate(spheres):
-            x_i, y_i, _ = sphere_i
+            x_i, y_i, _, _, _ = sphere_i
             min_distance = float('inf')
 
             # Find the minimum distance to any other sphere
             for j, sphere_j in enumerate(spheres):
                 if i == j:
                     continue  # Skip comparing the sphere with itself
-                x_j, y_j, _ = sphere_j
+                x_j, y_j, _, _, _ = sphere_j
                 distance = np.sqrt((x_j - x_i) ** 2 + (y_j - y_i) ** 2)
                 min_distance = min(min_distance, distance)
             
@@ -253,11 +303,11 @@ class MaskHelper:
         Assign numbers to spheres based on their angle relative to the global center.
         
         Args:
-        spheres (list of tuples): A list of tuples where each tuple contains (x_center, y_center, radius)
+        spheres (list of tuples): A list of tuples where each tuple contains (x_center, y_center, a, b, theta).
         global_center (tuple): (x_avg, y_avg) global center coordinates.
 
         Returns:
-        list of tuples: A list of spheres sorted by increasing angle, with assigned numbers in the format (number, x_center, y_center, radius, angle).
+        list of tuples: A list of spheres sorted by increasing angle, with assigned numbers in the format (number, x_center, y_center, a, b, theta, angle).
         """
         # Find the isolated sphere using pairwise distances
         isolated_sphere = MaskHelper.find_isolated_sphere(spheres)
@@ -265,20 +315,20 @@ class MaskHelper:
         # Calculate the angle for each sphere
         spheres_with_angles = []
         for sphere in spheres:
-            x_center, y_center, radius = sphere
+            x_center, y_center, a, b, theta = sphere
             angle = MaskHelper.calculate_angle(x_center, y_center, global_center)
-            spheres_with_angles.append((x_center, y_center, radius, angle))
+            spheres_with_angles.append((x_center, y_center, a, b, theta, angle))
 
         # Sort the spheres by angle in counterclockwise direction
-        sorted_spheres = sorted(spheres_with_angles, key=lambda s: s[3])
+        sorted_spheres = sorted(spheres_with_angles, key=lambda s: s[-1])
 
         # Find the isolated sphere in the sorted list and start numbering from it
         isolated_sphere_angle = MaskHelper.calculate_angle(isolated_sphere[0], isolated_sphere[1], global_center)
-        sorted_spheres = sorted(sorted_spheres, key=lambda s: (s[3] > isolated_sphere_angle, -s[3]))
+        sorted_spheres = sorted(sorted_spheres, key=lambda s: (s[-1] > isolated_sphere_angle, -s[-1]))
 
         # Assign numbers based on the sorted order, starting with the isolated sphere
         numbered_spheres = []
-        for i, (x_center, y_center, radius, angle) in enumerate(sorted_spheres):
-            numbered_spheres.append((i + 1, x_center, y_center, radius, angle))  # i+1 for numbering starting at 1
+        for i, (x_center, y_center, a, b, theta, angle) in enumerate(sorted_spheres):
+            numbered_spheres.append((i + 1, x_center, y_center, a, b, theta, angle))  # i+1 for numbering starting at 1
         
         return numbered_spheres
