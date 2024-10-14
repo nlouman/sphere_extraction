@@ -40,6 +40,7 @@ parser.add_argument('--compression-scale', type=float, required=False, default=0
 parser.add_argument('--num-spheres', type=int, required=True, help='Number of spheres to extract')
 parser.add_argument('--padding', type=int, required=False, default=0, help='Padding to add to bounding box during mask extraction')
 parser.add_argument('--order-spheres', type=bool, required=False, default=True, help='Order spheres by angle')
+parser.add_argument('--restarts', type=int, required=False, default=1, help='Number of restarts for the regression ellipse fitting on the SAM2 mask')
 
 args = parser.parse_args()
 
@@ -67,6 +68,7 @@ MASK_CONFIG_PATH = args.mask_model_config_path
 MASK_WEIGHTS_PATH = args.mask_model_weights_path
 PADDING = args.padding
 NUM_SPHERES = args.num_spheres
+NUM_RESTARTS = args.restarts
 
 # Create folder structure
 Helper.create_folder_structure(OUTPUT_FOLDER, MASK_OUTPUT_FOLDER, BBOX_OUTPUT_FOLDER)
@@ -214,28 +216,9 @@ for path, name, image, bboxes in tqdm.tqdm(boxes_xyxy):
             (0.75*r_max, r_max),                  # b bounds (semi-minor axis, min 1 to max_b)
             (-np.pi, np.pi)          # theta bounds (angle in radians, range [-π/2, π/2])
         ]
-        # Define the constraints for the optimization (ellipse ratio constraint)
-        # constraints = [
-        #     {'type': 'ineq', 'fun': lambda params: MaskHelper.ellipse_ratio_constraint(params, min_ratio=0.8, max_ratio=1.2)}
-        # ]
-
-        # # Minimize the loss function with bounds and constraints
-        # # result = minimize(MaskHelper.loss_function, x0, args=(filtered_mask, 3, 1), bounds=bounds, constraints=constraints)
-        # # ALTERNATIVE: Minimize the loss function with bounds using Powell method (no constraints)
-        # result = minimize(MaskHelper.loss_function, x0, args=(filtered_mask, 1, 1), bounds=bounds, method='Powell')
-
-        # # Extract the optimized ellipse parameters and compute the final loss proportional to the mask size
-        # x_c_opt, y_c_opt, a_opt, b_opt, theta_opt = result.x
-        # final_loss = MaskHelper.loss_function(result.x, filtered_mask) / ((x_max - x_min) * (y_max - y_min))
-
-        # print(f"Initial guess: {x0}")
-        # print(f"Optimized parameters: {result.x}")
-
-        # # Convert to  parameters
-        # ellipse_params = (x_c_opt+x_min_padded, y_c_opt+y_min_padded, a_opt, b_opt, theta_opt)
 
         # Fit the ellipse with restarts
-        best_ellipse_params, best_loss = MaskHelper.fit_ellipse_with_restarts(filtered_mask, x0, bounds, num_restarts=5, seed=42, normalization_param=(x_max - x_min) * (y_max - y_min))
+        best_ellipse_params, best_loss = MaskHelper.fit_ellipse_with_restarts(filtered_mask, x0, bounds, num_restarts=NUM_RESTARTS, seed=42, normalization_param=(x_max - x_min) * (y_max - y_min))
 
         # Extract the optimized ellipse parameters
         x_c_opt, y_c_opt, a_opt, b_opt, theta_opt = best_ellipse_params

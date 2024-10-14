@@ -18,5 +18,5 @@ This project extracts spheres from images and saves the estimated circle paramet
 To run the extraction process, use the following command (adjust to your needs):
 
 ```bash
-python sphere_mask_extraction.py --image-folder /path/to/image/directory --output-folder /path/to/output/directory --padding 0 --num-spheres 18
+python sphere_mask_extraction.py --image-folder /path/to/image/directory --output-folder /path/to/output/directory --padding 0 --num-spheres 18 --restarts 5
 ```
