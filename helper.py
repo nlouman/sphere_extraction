@@ -25,31 +25,51 @@ class Helper:
             os.makedirs(bbox_output_folder)
 
 class BboxHelper:
+    @staticmethod
     def get_compressed(image_path: str, compression_factor: float = 0.5, method: str = 'groundingdino') -> Tuple[np.array, torch.Tensor]:
         """
-        Compress image if there is no compressed version in the same directory.
-        Otherwise, load the compressed image. Wrapper around load_image from GroundingDINO.
-
+        Compress image and save a compressed version to disk if not already present.
+        
         Args:
-            image_path (str): Path to the image file.
+            image_path (str): Path to the original image file.
             compression_factor (float): Factor to scale down the image. Actual compression will be compression_factor^2.
-            method (str): Method to use for loading the image.
+            method (str): Model method name (currently only 'groundingdino' is supported).
         Returns:
-            Tuple[np.array, torch.Tensor]: Original image and transformed image.
+            Tuple[np.array, torch.Tensor]: Original image (as np.array) and compressed image as a torch.Tensor.
         """
-        if method == 'groundingdino':
-            if not image_path.endswith('_compressed.jpg'):
-                compressed_path = image_path.strip('.jpg') + "_compressed.jpg"
-                # Load original image
-                image = cv2.imread(image_path)
-                # Scale down the image
-                compressed_image = cv2.resize(image, (0, 0), fx=compression_factor, fy=compression_factor, interpolation=cv2.INTER_AREA)
-                # Save compressed image
-                cv2.imwrite(compressed_path, compressed_image)
-                image_path = compressed_path
-            return load_image(image_path)
-        else:
+        if method != 'groundingdino':
             raise NotImplementedError(f"Loading for method {method} is not implemented.")
+
+        import torchvision.transforms as T
+        import torch
+        from PIL import Image
+
+        # Ensure the image ends with .jpg (standardize extension handling)
+        if not image_path.lower().endswith('.jpg'):
+            raise ValueError(f"Only .jpg files are supported. Got: {image_path}")
+
+        # Path where compressed image will be stored
+        compressed_path = image_path.replace('.jpg', '_compressed.jpg')
+
+        # Load original image (OpenCV BGR for later annotation)
+        image_bgr = cv2.imread(image_path)
+        if image_bgr is None:
+            raise FileNotFoundError(f"Could not read image: {image_path}")
+
+        if not os.path.exists(compressed_path):
+            # Convert to RGB and resize using PIL
+            image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+            image_pil = Image.fromarray(image_rgb)
+
+            w, h = image_pil.size
+            new_size = (int(w * compression_factor), int(h * compression_factor))
+            resized_image = image_pil.resize(new_size, resample=Image.Resampling.BILINEAR)
+
+            # Save resized image to disk
+            resized_image.save(compressed_path)
+
+        # Now load the compressed image using the original loader
+        return load_image(compressed_path)
         
     def box_conversion_to_xyxy(img, boxes: torch.Tensor) -> np.array:
         """
@@ -85,12 +105,18 @@ class MaskHelper:
         # Label all connected components in the binary mask
         num_labels, labels_im = cv2.connectedComponents(mask, connectivity=4)
 
-        # Get the label of the connected component that contains the center point
-        center_label = labels_im[center[1], center[0]]  # Remember, it's (y, x) for numpy
+        # Calculate the size of each connected component
+        component_sizes = np.bincount(labels_im.flatten())
 
-        # Create a new mask that only contains the blob with the center point
+        # Ignore the background component (label 0)
+        component_sizes[0] = 0
+
+        # Find the label of the largest connected component
+        largest_label = np.argmax(component_sizes)
+
+        # Create a new mask that only contains the largest blob
         largest_blob = np.zeros_like(mask)
-        largest_blob[labels_im == center_label] = 1  # Keep only the component containing the center
+        largest_blob[labels_im == largest_label] = 1  # Keep only the largest component
 
         return largest_blob
     
@@ -208,7 +234,7 @@ class MaskHelper:
                 best_loss = final_loss
                 best_result = result.x
 
-            print(f"Restart {restart + 1}/{num_restarts}: Initial guess = {randomized_x0}, Optimized parameters = {result.x}, Loss = {final_loss}")
+            # print(f"Restart {restart + 1}/{num_restarts}: Initial guess = {randomized_x0}, Optimized parameters = {result.x}, Loss = {final_loss}")
 
         return best_result, best_loss
     
